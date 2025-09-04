@@ -168,3 +168,5 @@ samples_deepcad
 *.pt
 *.pth
 data
+DeepCAD
+VecSetX
