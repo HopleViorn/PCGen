@@ -975,7 +975,7 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
 import pyviz3d.visualizer as vis
 import numpy as np
 
-def save_points_and_lines_as_ply(points, filename, bboxes=None, faces=None):
+def save_points_and_lines_as_ply(points, filename, bboxes=None, faces=None, condition = None):
     """
     Saves a batch of control points, optional bounding box lines, and faces to a .html file using pyviz3d.
     
@@ -1003,6 +1003,14 @@ def save_points_and_lines_as_ply(points, filename, bboxes=None, faces=None):
     if points_np.size > 0:
         point_colors = np.tile(np.array([255, 0, 0]), (len(points_np), 1))
         v.add_points("Control Points", points_np, colors=point_colors, point_size=20)
+
+    if condition.size > 0:
+
+        distances = np.linalg.norm(points_np, axis=1)
+        scale = np.max(distances)
+        condition *= scale
+
+        v.add_points("Input Points", condition, colors=np.tile(np.array([0, 255, 0]), (len(condition), 1)), point_size=25)
 
     if faces is not None:
         v.add_mesh("Surface", vertices=points_np, faces=faces)
