@@ -11,6 +11,7 @@ from diffusers import AutoencoderKL, DDPMScheduler
 from network import *
 from network_conditional import CondSurfPosNet, CondSurfZNet
 from VecSetX.vecset.models import autoencoder as vecset_ae
+from vae_models import ShapeVAE
 
 
 class SurfVAETrainer():
@@ -1052,6 +1053,7 @@ class CondSurfPosTrainer(SurfPosTrainer):
         self.epoch = 0
         self.save_dir = args.save_dir
         self.use_cf = args.cf
+        self.use_precomputed_cond = getattr(args, 'use_precomputed_cond', False)
         
         # DDP setup
         local_rank = int(os.environ['LOCAL_RANK'])
@@ -1065,14 +1067,12 @@ class CondSurfPosTrainer(SurfPosTrainer):
         model = model.to(self.device)
         self.model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
-        # Load VecSetX VAE Encoder
-        self.vae_encoder = vecset_ae.__dict__['point_vec1024x32_dim1024_depth24_nb'](pc_size=8192)
-        checkpoint = torch.load(args.vecset_vae_weights, map_location='cpu')
-        model_state_dict = checkpoint['model']
-        if any(key.startswith('module.') for key in model_state_dict):
-            model_state_dict = {k.replace('module.', ''): v for k, v in model_state_dict.items()}
-        self.vae_encoder.load_state_dict(model_state_dict)
-        self.vae_encoder = self.vae_encoder.to(self.device).eval()
+        if args.weight is not None:
+            self.model.module.load_state_dict(torch.load(args.weight, map_location='cpu'))
+            print(f"Loaded weights from {args.weight}")
+
+        # Initialize VAE Manager
+        self.shape_vae = ShapeVAE(args, self.device)
 
         self.loss_fn = nn.MSELoss()
 
@@ -1091,7 +1091,7 @@ class CondSurfPosTrainer(SurfPosTrainer):
         
         self.optimizer = torch.optim.AdamW(
             self.network_params,
-            lr=5e-4,
+            lr=5e-5,
             betas=(0.95, 0.999),
             weight_decay=1e-6,
             eps=1e-08,
@@ -1128,20 +1128,26 @@ class CondSurfPosTrainer(SurfPosTrainer):
         # Train
         for data in self.train_dataloader:
             with torch.cuda.amp.autocast():
-                if self.use_cf:
-                    data_cuda = [dat.to(self.device) for dat in data] # map to gpu
-                    surfPos, class_label, point_cloud = data_cuda
+                if self.use_precomputed_cond:
+                    if self.use_cf:
+                        surfPos, class_label, condition = [d.to(self.device) for d in data]
+                    else:
+                        surfPos, condition = [d.to(self.device) for d in data]
+                        class_label = None
                 else:
-                    surfPos, point_cloud = [d.to(self.device) for d in data]
-                    class_label = None
+                    if self.use_cf:
+                        data_cuda = [dat.to(self.device) for dat in data] # map to gpu
+                        surfPos, class_label, point_cloud = data_cuda
+                    else:
+                        surfPos, point_cloud = [d.to(self.device) for d in data]
+                        class_label = None
+                    
+                    with torch.no_grad():
+                        # Get latent embedding from VAE manager
+                        condition = self.shape_vae.get_embedding(point_cloud)
 
                 bsz = len(surfPos)
                 
-                with torch.no_grad():
-                    # Check if point_cloud is already an embedding or needs to be encoded
-                    latent_embedding = self.vae_encoder.encode(point_cloud)['x']
-                    condition = self.vae_encoder.learn(latent_embedding)
-
                 self.optimizer.zero_grad() # zero gradient
 
                 # Add noise
@@ -1219,6 +1225,10 @@ class CondSurfZTrainer(SurfZTrainer):
         model = CondSurfZNet(self.use_cf)
         model = model.to(self.device)
         self.model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+
+        if args.weight is not None:
+            self.model.module.load_state_dict(torch.load(args.weight, map_location='cpu'))
+            print(f"Loaded weights from {args.weight}")
 
         # Load pretrained surface vae (fast encode version)
         surf_vae = AutoencoderKLFastEncode(in_channels=3,
@@ -1415,3 +1425,4 @@ class CondSurfZTrainer(SurfZTrainer):
         if self.local_rank == 0:
             torch.save(self.model.module.state_dict(), os.path.join(self.save_dir,'surfz_epoch_'+str(self.epoch)+'.pt'))
         return
+

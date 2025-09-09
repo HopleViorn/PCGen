@@ -1,0 +1,3 @@
+python sample_cond_surface_fm.py --mode deepcad --point_cloud /home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/pc_cad/0074/00740902.ply
+python sample_cond_surface.py --mode deepcad --point_cloud /home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/pc_cad/0064/00640071.ply
+python sample_cond_surface.py --mode deepcad --point_cloud /home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/pc_normal/0064/00640071.ply

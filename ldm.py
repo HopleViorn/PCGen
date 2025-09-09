@@ -13,6 +13,7 @@ if not os.path.exists(args.save_dir):
 
 from dataset import *
 from trainer import *
+from trainer_fm import *
 
 def run(args):
     # Initialize dataset and trainer
@@ -44,21 +45,21 @@ def run(args):
     elif args.option == 'cond_surfz':
         train_dataset = CondSurfZData(args.data, getattr(args, 'list', None), validate=False, aug=args.data_aug, args=args)
         val_dataset = CondSurfZData(args.data, getattr(args, 'list', None), validate=True, aug=False, args=args)
-        ldm = CondSurfTrainer(args, train_dataset, val_dataset)
+        ldm = CondSurfZTrainer(args, train_dataset, val_dataset)
 
-    elif args.option == 'cond_edgepos':
-        train_dataset = CondEdgePosData(args.data, getattr(args, 'list', None), validate=False, aug=args.data_aug, args=args)
-        val_dataset = CondEdgePosData(args.data, getattr(args, 'list', None), validate=True, aug=False, args=args)
-        ldm = CondEdgePosTrainer(args, train_dataset, val_dataset)
+    elif args.option == 'cond_surfpos_fm':
+        train_dataset = CondSurfPosData(args.data, getattr(args, 'list', None), validate=False, aug=args.data_aug, args=args)
+        val_dataset = CondSurfPosData(args.data, getattr(args, 'list', None), validate=True, aug=False, args=args)
+        ldm = CondSurfPosTrainerFM(args, train_dataset, val_dataset)
 
-    elif args.option == 'cond_edgez':
-        train_dataset = CondEdgeZData(args.data, getattr(args, 'list', None), validate=False, aug=args.data_aug, args=args)
-        val_dataset = CondEdgeZData(args.data, getattr(args, 'list', None), validate=True, aug=False, args=args)
-        ldm = CondEdgeZTrainer(args, train_dataset, val_dataset)
+    elif args.option == 'cond_surfz_fm':
+        train_dataset = CondSurfZData(args.data, getattr(args, 'list', None), validate=False, aug=args.data_aug, args=args)
+        val_dataset = CondSurfZData(args.data, getattr(args, 'list', None), validate=True, aug=False, args=args)
+        ldm = CondSurfZTrainerFM(args, train_dataset, val_dataset)
 
     else:
         print(args.option)
-        assert False, 'please choose between [surfpos, surfz, edgepos, edgez, cond_surfpos, cond_surfz]'
+        assert False, 'please choose between [surfpos, surfz, edgepos, edgez, cond_surfpos, cond_surfz, cond_surfpos_fm, cond_surfz_fm]'
 
     print('Start training...')
     
@@ -69,8 +70,8 @@ def run(args):
         ldm.train_one_epoch()        
 
         # Evaluate model performance on validation set
-        if ldm.epoch % args.test_nepoch == 0:
-            ldm.test_val()
+        # if ldm.epoch % args.test_nepoch == 0:
+            # ldm.test_val()
 
         # save model
         if ldm.epoch % args.save_nepoch == 0:

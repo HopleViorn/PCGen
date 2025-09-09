@@ -97,6 +97,7 @@ def randn_tensor(
     return latents
 
 
+    
 def pad_repeat(x, max_len):
     repeat_times = math.floor(max_len/len(x))
     sep = max_len-repeat_times*len(x)
@@ -180,12 +181,12 @@ def get_args_ldm():
     # parser.add_argument('--list', type=str, default='data_process/deepcad_data_split_6bit.pkl', 
     parser.add_argument('--list', type=str, default=None, 
                         help='Path to data list')  
-    parser.add_argument('--surfvae', type=str, default='proj_log/deepcad_surfvae/epoch_400.pt', 
+    parser.add_argument('--surfvae', type=str, default='deepcad_vae_surf.pt', 
                         help='Path to pretrained surface vae weights')  
     parser.add_argument('--edgevae', type=str, default='proj_log/deepcad_edgevae/epoch_300.pt', 
                         help='Path to pretrained edge vae weights')  
-    parser.add_argument("--option", type=str, choices=['surfpos', 'surfz', 'edgepos', 'edgez','cond_surfz','cond_surfpos'], default='surfpos', 
-                        help="Choose between option [surfpos,edgepos,surfz,edgez] (default: surfpos)")
+    parser.add_argument("--option", type=str, default='surfpos', 
+                        help="Choose between option (default: surfpos)")
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=512, help='input batch size')  
     parser.add_argument('--train_nepoch', type=int, default=3000, help='number of epochs to train for')
@@ -199,11 +200,16 @@ def get_args_ldm():
     parser.add_argument("--gpu", type=int, nargs='+', default=[0, 1, 2, 3, 4, 5, 6, 7], help="GPU IDs to use for training (default: [0, 1])")
     parser.add_argument("--data_aug",  action='store_true', help='Use data augmentation')
     parser.add_argument("--cf",  action='store_true', help='Use data augmentation')
+    parser.add_argument("--weight", type=str, default=None, help="Path to weight file")
     # Save dirs and reload
     parser.add_argument('--env', type=str, default="surface_pos", help='environment')
     parser.add_argument('--dir_name', type=str, default="proj_log", help='name of the log folder.')
     parser.add_argument('--vecset_vae_weights', type=str,default="/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/checkpoint-110.pth")
-    parser.add_argument('--precomputed_emd', action='store_true')
+
+    parser.add_argument('--vae_encoder_type', type=str, default='vecset', help='Type of VAE encoder to use: "vecset" or "hy3dshape"')
+    
+    parser.add_argument('--use_precomputed_cond', action='store_true')
+    parser.add_argument('--cond_dir',type=str, default= '/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/conditions')
 
     args = parser.parse_args()
     # saved folder
@@ -1004,13 +1010,13 @@ def save_points_and_lines_as_ply(points, filename, bboxes=None, faces=None, cond
         point_colors = np.tile(np.array([255, 0, 0]), (len(points_np), 1))
         v.add_points("Control Points", points_np, colors=point_colors, point_size=20)
 
-    if condition.size > 0:
+    if condition is not None and condition.size > 0:
 
         distances = np.linalg.norm(points_np, axis=1)
         scale = np.max(distances)
         condition *= scale
 
-        v.add_points("Input Points", condition, colors=np.tile(np.array([0, 255, 0]), (len(condition), 1)), point_size=25)
+        v.add_points("Input Points", condition[:,:3], colors=np.tile(np.array([0, 255, 0]), (len(condition), 1)), point_size=25)
 
     if faces is not None:
         v.add_mesh("Surface", vertices=points_np, faces=faces)

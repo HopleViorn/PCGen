@@ -6,10 +6,7 @@ import numpy as np
 from tqdm import tqdm
 import trimesh
 from network import *
-from network_conditional import CondSurfPosNet, CondSurfZNet
-from diffusers import DDPMScheduler, PNDMScheduler
-from OCC.Extend.DataExchange import write_stl_file, write_step_file
-from plyfile import PlyData
+from network_conditional import CondSurfPosNetFM, CondSurfZNetFM
 from utils import (
     randn_tensor,
     compute_bbox_center_and_size,
@@ -23,54 +20,33 @@ from utils import (
 )
 from dataset import normalize_point_cloud, resample_point_cloud
 from VecSetX.vecset.models import autoencoder as vecset_ae
-from vae_models import ShapeVAE
 
 
 text2int = {'uncond':0,
             'bathtub':1,
-            'bed':2,
-            'bench':3,
+            'bed':2, 
+            'bench':3, 
             'bookshelf':4,
-            'cabinet':5,
-            'chair':6,
-            'couch':7,
-            'lamp':8,
-            'sofa':9,
+            'cabinet':5, 
+            'chair':6, 
+            'couch':7, 
+            'lamp':8, 
+            'sofa':9, 
             'table':10
             }
 
 
-def load_point_cloud(ply_path, vae_encoder_type='vecset', num_points=8192):
+def load_point_cloud(ply_path, num_points=8192):
     """Load and preprocess point cloud from .ply file"""
-    if vae_encoder_type == 'hy3dshape':
-        plydata = PlyData.read(ply_path)
-        vertex_data = plydata['vertex']
-        points = np.vstack([vertex_data['x'], vertex_data['y'], vertex_data['z']]).T
-        normals = np.vstack([vertex_data['nx'], vertex_data['ny'], vertex_data['nz']]).T
-        
-        # Normalize points
-        points = normalize_point_cloud(points)
-        
-        # Resample
-        num_points = 81920
-        if len(points) != num_points:
-            indices = np.random.choice(len(points), num_points, replace=len(points) < num_points)
-            points = points[indices]
-            normals = normals[indices]
-
-        # For hy3dshape, we need points, normals, and a sharp edge label (0 for now)
-        sharp_edge_labels = np.zeros((points.shape[0], 1), dtype=np.float32)
-        point_cloud = np.concatenate([points, normals, sharp_edge_labels], axis=1)
-    else: # 'vecset' or default
-        # Load point cloud
-        mesh = trimesh.load(ply_path)
-        point_cloud = mesh.vertices
-        
-        # Normalize the point cloud
-        point_cloud = normalize_point_cloud(point_cloud)
-        
-        # Resample to the required size
-        point_cloud = resample_point_cloud(point_cloud, num_points)
+    # Load point cloud
+    mesh = trimesh.load(ply_path)
+    point_cloud = mesh.vertices
+    
+    # Normalize the point cloud
+    point_cloud = normalize_point_cloud(point_cloud)
+    
+    # Resample to the required size
+    point_cloud = resample_point_cloud(point_cloud, num_points)
         
     return torch.FloatTensor(point_cloud)
 
@@ -85,10 +61,11 @@ def sample(eval_args, point_cloud_path=None):
     save_folder = eval_args['save_folder']
     num_surfaces = eval_args['num_surfaces']
     num_edges = eval_args['num_edges']
+    num_inference_steps = eval_args.get('num_inference_steps', 100)
 
     if eval_args['use_cf']:
         class_label = torch.LongTensor([text2int[eval_args['class_label']]]*batch_size + \
-                                       [text2int['uncond']]*batch_size).cuda().reshape(-1,1)
+                                       [text2int['uncond']]*batch_size).cuda().reshape(-1,1) 
         w = 0.6
     else:
         class_label = None
@@ -96,16 +73,21 @@ def sample(eval_args, point_cloud_path=None):
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
 
-    surfPos_model = CondSurfPosNet(eval_args['use_cf'])
-    # surfPos_model.load_state_dict(torch.load(eval_args['surfpos_weight']))
-    surfPos_model.load_state_dict(torch.load('proj_log/deepcad_ldm_surfpos_hy/surfpos_epoch_4.pt'))
+    surfPos_model = CondSurfPosNetFM(eval_args['use_cf'])
+    surfPos_model.load_state_dict(torch.load(eval_args['surfpos_weight']))
     surfPos_model = surfPos_model.to(device).eval()
-    # Initialize VAE Manager
-    shape_vae = ShapeVAE(argparse.Namespace(**eval_args), device)
 
-    # surfZ_model = CondSurfZNet(eval_args['use_cf'])
-    # surfZ_model.load_state_dict(torch.load('proj_log/deepcad_ldm_surfz/surfz_epoch_3.pt'))
-    surfZ_model = SurfZNet(eval_args['use_cf'])
+    # Load VecSetX VAE Encoder
+    vae_encoder = vecset_ae.__dict__['point_vec1024x32_dim1024_depth24_nb'](pc_size=8192)
+    vae_weights_path = eval_args.get('vecset_vae_weights', '/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/checkpoint-110.pth')
+    checkpoint = torch.load(vae_weights_path, map_location='cpu')
+    model_state_dict = checkpoint['model']
+    if any(key.startswith('module.') for key in model_state_dict):
+        model_state_dict = {k.replace('module.', ''): v for k, v in model_state_dict.items()}
+    vae_encoder.load_state_dict(model_state_dict)
+    vae_encoder = vae_encoder.to(device).eval()
+
+    surfZ_model = CondSurfZNetFM(eval_args['use_cf'])
     surfZ_model.load_state_dict(torch.load(eval_args['surfz_weight']))
     surfZ_model = surfZ_model.to(device).eval()
 
@@ -138,24 +120,6 @@ def sample(eval_args, point_cloud_path=None):
     edge_vae.load_state_dict(torch.load(eval_args['edgevae_weight']), strict=False)
     edge_vae = edge_vae.to(device).eval()
 
-    pndm_scheduler = PNDMScheduler(
-        num_train_timesteps=1000,
-        beta_schedule='linear',
-        prediction_type='epsilon',
-        beta_start = 0.0001,
-        beta_end = 0.02,
-    )
-
-    ddpm_scheduler = DDPMScheduler(
-        num_train_timesteps=1000,
-        beta_schedule='linear',
-        prediction_type='epsilon',
-        beta_start = 0.0001,
-        beta_end = 0.02,
-        clip_sample = True,
-        clip_sample_range=3
-    ) 
-
 
     with torch.no_grad():
         with torch.cuda.amp.autocast():
@@ -163,7 +127,7 @@ def sample(eval_args, point_cloud_path=None):
             # Load or generate point cloud as condition
             if point_cloud_path and os.path.exists(point_cloud_path):
                 print(f"Loading point cloud from {point_cloud_path}")
-                point_cloud = load_point_cloud(point_cloud_path, eval_args['vae_encoder_type']).unsqueeze(0).to(device)
+                point_cloud = load_point_cloud(point_cloud_path).unsqueeze(0).to(device)
                 # Repeat for batch size
                 point_cloud = point_cloud.repeat(batch_size, 1, 1)
             else:
@@ -171,46 +135,48 @@ def sample(eval_args, point_cloud_path=None):
                 # Generate random point cloud as condition (8192 points as in the training)
                 point_cloud = torch.randn(batch_size, 8192, 3).to(device)
             
-            # Get latent embedding from VAE manager
+            # Encode point cloud using VAE encoder
             with torch.no_grad():
-                condition = shape_vae.get_embedding(point_cloud)
-                print(condition.shape)
+                latent_embedding = vae_encoder.encode(point_cloud)['x']
+                condition = vae_encoder.learn(latent_embedding)
         
             ###########################################
             # STEP 1-1: generate the surface position #
             ###########################################
-            surfPos = randn_tensor((batch_size, num_surfaces, 6)).to(device)
+            surfPos = randn_tensor((batch_size, num_surfaces, 6)).to(device) # z_0
 
-            pndm_scheduler.set_timesteps(200)
-            for t in tqdm(pndm_scheduler.timesteps[:158]):#
-                timesteps = t.reshape(-1).cuda()
+            timesteps = torch.linspace(0, 1, num_inference_steps, device=device)
+            dt = timesteps[1] - timesteps[0]
+
+            for i in tqdm(range(len(timesteps) - 1)):
+                t_cur, t_next = timesteps[i], timesteps[i+1]
+                dt = t_next - t_cur
+
+                # Predictor step (Euler)
+                time_input_cur = t_cur.expand(batch_size) * 999.0
                 if class_label is not None:
                     _surfPos_ = surfPos.repeat(2,1,1)
                     _condition_ = condition.repeat(2,1,1)
-                    pred = surfPos_model(_surfPos_, timesteps, class_label, _condition_)
-                    pred = pred[:batch_size] * (1+w) - pred[batch_size:] * w
+                    pred_cur = surfPos_model(_surfPos_, time_input_cur.repeat(2), class_label, _condition_)
+                    pred_cur = pred_cur[:batch_size] * (1+w) - pred_cur[batch_size:] * w
                 else:
-                    pred = surfPos_model(surfPos, timesteps, class_label, condition)
-                surfPos = pndm_scheduler.step(pred, t, surfPos).prev_sample
-           
-            # Late increase for ABC/DeepCAD (slightly more efficient)
-            if not eval_args['use_cf']:
-                surfPos = surfPos.repeat(1,2,1)
-                num_surfaces *= 2
+                    pred_cur = surfPos_model(surfPos, time_input_cur, class_label, condition)
+                
+                surfPos_next_hat = surfPos + pred_cur * dt
 
-            ddpm_scheduler.set_timesteps(1000)
-            for t in tqdm(ddpm_scheduler.timesteps[-250:]):
-                timesteps = t.reshape(-1).cuda()
+                # Corrector step
+                time_input_next = t_next.expand(batch_size) * 999.0
                 if class_label is not None:
-                    _surfPos_ = surfPos.repeat(2,1,1)
+                    _surfPos_next_hat_ = surfPos_next_hat.repeat(2,1,1)
                     _condition_ = condition.repeat(2,1,1)
-                    pred = surfPos_model(_surfPos_, timesteps, class_label, _condition_)
-                    pred = pred[:batch_size] * (1+w) - pred[batch_size:] * w
+                    pred_next = surfPos_model(_surfPos_next_hat_, time_input_next.repeat(2), class_label, _condition_)
+                    pred_next = pred_next[:batch_size] * (1+w) - pred_next[batch_size:] * w
                 else:
-                    pred = surfPos_model(surfPos, timesteps, class_label, condition)
-                surfPos = ddpm_scheduler.step(pred, t, surfPos).prev_sample
+                    pred_next = surfPos_model(surfPos_next_hat, time_input_next, class_label, condition)
+                
+                # Update surfPos with the average of the two derivatives
+                surfPos = surfPos + (pred_cur + pred_next) * dt / 2
            
-
             #######################################
             # STEP 1-2: remove duplicate surfaces #
             #######################################
@@ -246,21 +212,38 @@ def sample(eval_args, point_cloud_path=None):
             #################################
             surfZ = randn_tensor((batch_size, num_surfaces, 48)).to(device)
             
-            pndm_scheduler.set_timesteps(200)   
-            for t in tqdm(pndm_scheduler.timesteps): 
-                timesteps = t.reshape(-1).cuda()
+            for i in tqdm(range(len(timesteps) - 1)):
+                t_cur, t_next = timesteps[i], timesteps[i+1]
+                dt = t_next - t_cur
+
+                # Predictor step (Euler)
+                time_input_cur = t_cur.expand(batch_size) * 999.0
                 if class_label is not None:
                     _surfZ_ = surfZ.repeat(2,1,1)
                     _surfPos_ = surfPos.repeat(2,1,1)
                     _surfMask_ = surfMask.repeat(2,1)
                     _condition_ = condition.repeat(2,1,1)
-                    pred = surfZ_model(_surfZ_, timesteps, _surfPos_, _surfMask_, class_label)
-                    # pred = surfZ_model(_surfZ_, timesteps, _surfPos_, _surfMask_, class_label, _condition_)
-                    pred = pred[:batch_size] * (1+w) - pred[batch_size:] * w
+                    pred_cur = surfZ_model(_surfZ_, time_input_cur.repeat(2), _surfPos_, _surfMask_, class_label, _condition_)
+                    pred_cur = pred_cur[:batch_size] * (1+w) - pred_cur[batch_size:] * w
                 else:
-                    pred = surfZ_model(surfZ, timesteps, surfPos, surfMask, class_label)
-                    # pred = surfZ_model(surfZ, timesteps, surfPos, surfMask, class_label, condition)
-                surfZ = pndm_scheduler.step(pred, t, surfZ).prev_sample
+                    pred_cur = surfZ_model(surfZ, time_input_cur, surfPos, surfMask, class_label, condition)
+                
+                surfZ_next_hat = surfZ + pred_cur * dt
+
+                # Corrector step
+                time_input_next = t_next.expand(batch_size) * 999.0
+                if class_label is not None:
+                    _surfZ_next_hat_ = surfZ_next_hat.repeat(2,1,1)
+                    _surfPos_ = surfPos.repeat(2,1,1)
+                    _surfMask_ = surfMask.repeat(2,1)
+                    _condition_ = condition.repeat(2,1,1)
+                    pred_next = surfZ_model(_surfZ_next_hat_, time_input_next.repeat(2), _surfPos_, _surfMask_, class_label, _condition_)
+                    pred_next = pred_next[:batch_size] * (1+w) - pred_next[batch_size:] * w
+                else:
+                    pred_next = surfZ_model(surfZ_next_hat, time_input_next, surfPos, surfMask, class_label, condition)
+
+                # Update surfZ with the average of the two derivatives
+                surfZ = surfZ + (pred_cur + pred_next) * dt / 2
 
     for batch_idx in range(batch_size):
         random_string = generate_random_string(15)
@@ -281,7 +264,6 @@ def sample(eval_args, point_cloud_path=None):
             wcs = ncs * (bsize / 2) + bcenter
             surf_wcs_cad.append(wcs)
         surf_wcs_cad = np.array(surf_wcs_cad)
-        # save_points_and_lines_as_ply(surf_wcs_cad, os.path.join(save_folder, f'{savename}_surf_pts.ply'))
         save_points_and_lines_as_ply(surf_wcs_cad, os.path.join(save_folder, f'{savename}'), bboxes=surf_pos_cad, condition= point_cloud[batch_idx].cpu().numpy() if point_cloud_path else None)
 
 if __name__ == "__main__":
@@ -290,14 +272,11 @@ if __name__ == "__main__":
                         help="Choose between evaluation mode [abc/deepcad/furniture] (default: abc)")
     parser.add_argument("--point_cloud", type=str, default=None,
                         help="Path to the point cloud .ply file for conditional generation")
-    parser.add_argument("--vae_encoder_type", type=str, choices=['vecset', 'hy3dshape'], default='vecset',
-                        help="Choose VAE encoder type [vecset/hy3dshape] (default: vecset)")
     args = parser.parse_args()
 
     # Load evaluation config
     with open('eval_config.yaml', 'r') as file:
         config = yaml.safe_load(file)
     eval_args = config[args.mode]
-    eval_args['vae_encoder_type'] = args.vae_encoder_type
 
     sample(eval_args, args.point_cloud)

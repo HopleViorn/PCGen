@@ -9,7 +9,6 @@ from network import *
 from network_conditional import CondSurfPosNet, CondSurfZNet
 from diffusers import DDPMScheduler, PNDMScheduler
 from OCC.Extend.DataExchange import write_stl_file, write_step_file
-from plyfile import PlyData
 from utils import (
     randn_tensor,
     compute_bbox_center_and_size,
@@ -23,54 +22,33 @@ from utils import (
 )
 from dataset import normalize_point_cloud, resample_point_cloud
 from VecSetX.vecset.models import autoencoder as vecset_ae
-from vae_models import ShapeVAE
 
 
 text2int = {'uncond':0,
             'bathtub':1,
-            'bed':2,
-            'bench':3,
+            'bed':2, 
+            'bench':3, 
             'bookshelf':4,
-            'cabinet':5,
-            'chair':6,
-            'couch':7,
-            'lamp':8,
-            'sofa':9,
+            'cabinet':5, 
+            'chair':6, 
+            'couch':7, 
+            'lamp':8, 
+            'sofa':9, 
             'table':10
             }
 
 
-def load_point_cloud(ply_path, vae_encoder_type='vecset', num_points=8192):
+def load_point_cloud(ply_path, num_points=8192):
     """Load and preprocess point cloud from .ply file"""
-    if vae_encoder_type == 'hy3dshape':
-        plydata = PlyData.read(ply_path)
-        vertex_data = plydata['vertex']
-        points = np.vstack([vertex_data['x'], vertex_data['y'], vertex_data['z']]).T
-        normals = np.vstack([vertex_data['nx'], vertex_data['ny'], vertex_data['nz']]).T
-        
-        # Normalize points
-        points = normalize_point_cloud(points)
-        
-        # Resample
-        num_points = 81920
-        if len(points) != num_points:
-            indices = np.random.choice(len(points), num_points, replace=len(points) < num_points)
-            points = points[indices]
-            normals = normals[indices]
-
-        # For hy3dshape, we need points, normals, and a sharp edge label (0 for now)
-        sharp_edge_labels = np.zeros((points.shape[0], 1), dtype=np.float32)
-        point_cloud = np.concatenate([points, normals, sharp_edge_labels], axis=1)
-    else: # 'vecset' or default
-        # Load point cloud
-        mesh = trimesh.load(ply_path)
-        point_cloud = mesh.vertices
-        
-        # Normalize the point cloud
-        point_cloud = normalize_point_cloud(point_cloud)
-        
-        # Resample to the required size
-        point_cloud = resample_point_cloud(point_cloud, num_points)
+    # Load point cloud
+    mesh = trimesh.load(ply_path)
+    point_cloud = mesh.vertices
+    
+    # Normalize the point cloud
+    point_cloud = normalize_point_cloud(point_cloud)
+    
+    # Resample to the required size
+    point_cloud = resample_point_cloud(point_cloud, num_points)
         
     return torch.FloatTensor(point_cloud)
 
@@ -88,7 +66,7 @@ def sample(eval_args, point_cloud_path=None):
 
     if eval_args['use_cf']:
         class_label = torch.LongTensor([text2int[eval_args['class_label']]]*batch_size + \
-                                       [text2int['uncond']]*batch_size).cuda().reshape(-1,1)
+                                       [text2int['uncond']]*batch_size).cuda().reshape(-1,1) 
         w = 0.6
     else:
         class_label = None
@@ -98,15 +76,24 @@ def sample(eval_args, point_cloud_path=None):
 
     surfPos_model = CondSurfPosNet(eval_args['use_cf'])
     # surfPos_model.load_state_dict(torch.load(eval_args['surfpos_weight']))
-    surfPos_model.load_state_dict(torch.load('proj_log/deepcad_ldm_surfpos_hy/surfpos_epoch_4.pt'))
+    surfPos_model.load_state_dict(torch.load('proj_log/deepcad_ldm_surfpos/surfpos_epoch_183.pt'))
     surfPos_model = surfPos_model.to(device).eval()
-    # Initialize VAE Manager
-    shape_vae = ShapeVAE(argparse.Namespace(**eval_args), device)
 
-    # surfZ_model = CondSurfZNet(eval_args['use_cf'])
-    # surfZ_model.load_state_dict(torch.load('proj_log/deepcad_ldm_surfz/surfz_epoch_3.pt'))
-    surfZ_model = SurfZNet(eval_args['use_cf'])
-    surfZ_model.load_state_dict(torch.load(eval_args['surfz_weight']))
+    # Load VecSetX VAE Encoder
+    vae_encoder = vecset_ae.__dict__['point_vec1024x32_dim1024_depth24_nb'](pc_size=8192)
+    # NOTE: You need to provide the correct path to the pretrained VAE weights
+    vae_weights_path = eval_args.get('vecset_vae_weights', '/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/checkpoint-110.pth')
+    checkpoint = torch.load(vae_weights_path, map_location='cpu')
+    model_state_dict = checkpoint['model']
+    if any(key.startswith('module.') for key in model_state_dict):
+        model_state_dict = {k.replace('module.', ''): v for k, v in model_state_dict.items()}
+    vae_encoder.load_state_dict(model_state_dict)
+    vae_encoder = vae_encoder.to(device).eval()
+
+    surfZ_model = CondSurfZNet(eval_args['use_cf'])
+    surfZ_model.load_state_dict(torch.load('proj_log/deepcad_ldm_surfz/surfz_epoch_68.pt'))
+    # surfZ_model = SurfZNet(eval_args['use_cf'])
+    # surfZ_model.load_state_dict(torch.load(eval_args['surfz_weight']))
     surfZ_model = surfZ_model.to(device).eval()
 
     surf_vae = AutoencoderKLFastDecode(in_channels=3,
@@ -163,7 +150,7 @@ def sample(eval_args, point_cloud_path=None):
             # Load or generate point cloud as condition
             if point_cloud_path and os.path.exists(point_cloud_path):
                 print(f"Loading point cloud from {point_cloud_path}")
-                point_cloud = load_point_cloud(point_cloud_path, eval_args['vae_encoder_type']).unsqueeze(0).to(device)
+                point_cloud = load_point_cloud(point_cloud_path).unsqueeze(0).to(device)
                 # Repeat for batch size
                 point_cloud = point_cloud.repeat(batch_size, 1, 1)
             else:
@@ -171,10 +158,10 @@ def sample(eval_args, point_cloud_path=None):
                 # Generate random point cloud as condition (8192 points as in the training)
                 point_cloud = torch.randn(batch_size, 8192, 3).to(device)
             
-            # Get latent embedding from VAE manager
+            # Encode point cloud using VAE encoder
             with torch.no_grad():
-                condition = shape_vae.get_embedding(point_cloud)
-                print(condition.shape)
+                latent_embedding = vae_encoder.encode(point_cloud)['x']
+                condition = vae_encoder.learn(latent_embedding)
         
             ###########################################
             # STEP 1-1: generate the surface position #
@@ -254,12 +241,12 @@ def sample(eval_args, point_cloud_path=None):
                     _surfPos_ = surfPos.repeat(2,1,1)
                     _surfMask_ = surfMask.repeat(2,1)
                     _condition_ = condition.repeat(2,1,1)
-                    pred = surfZ_model(_surfZ_, timesteps, _surfPos_, _surfMask_, class_label)
-                    # pred = surfZ_model(_surfZ_, timesteps, _surfPos_, _surfMask_, class_label, _condition_)
+                    # pred = surfZ_model(_surfZ_, timesteps, _surfPos_, _surfMask_, class_label)
+                    pred = surfZ_model(_surfZ_, timesteps, _surfPos_, _surfMask_, class_label, _condition_)
                     pred = pred[:batch_size] * (1+w) - pred[batch_size:] * w
                 else:
-                    pred = surfZ_model(surfZ, timesteps, surfPos, surfMask, class_label)
-                    # pred = surfZ_model(surfZ, timesteps, surfPos, surfMask, class_label, condition)
+                    # pred = surfZ_model(surfZ, timesteps, surfPos, surfMask, class_label)
+                    pred = surfZ_model(surfZ, timesteps, surfPos, surfMask, class_label, condition)
                 surfZ = pndm_scheduler.step(pred, t, surfZ).prev_sample
 
     for batch_idx in range(batch_size):
@@ -290,14 +277,11 @@ if __name__ == "__main__":
                         help="Choose between evaluation mode [abc/deepcad/furniture] (default: abc)")
     parser.add_argument("--point_cloud", type=str, default=None,
                         help="Path to the point cloud .ply file for conditional generation")
-    parser.add_argument("--vae_encoder_type", type=str, choices=['vecset', 'hy3dshape'], default='vecset',
-                        help="Choose VAE encoder type [vecset/hy3dshape] (default: vecset)")
     args = parser.parse_args()
 
     # Load evaluation config
     with open('eval_config.yaml', 'r') as file:
         config = yaml.safe_load(file)
     eval_args = config[args.mode]
-    eval_args['vae_encoder_type'] = args.vae_encoder_type
 
     sample(eval_args, args.point_cloud)

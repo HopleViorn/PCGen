@@ -4,6 +4,7 @@ import pickle
 import json
 import trimesh
 import torch
+from plyfile import PlyData
 import numpy as np 
 from tqdm import tqdm
 import random
@@ -667,7 +668,11 @@ class CondSurfPosData(SurfPosData):
     """ Surface position (3D bbox) Dataloader with point cloud condition """
     def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
         super().__init__(input_data, input_list, validate, aug, args)
-        self.precomputed_emd = getattr(args, 'precomputed_emd', False)  # Check if precomputed embeddings should be used
+        self.vae_encoder_type = getattr(args, 'vae_encoder_type', 'vecset')
+        self.use_precomputed_cond = getattr(args, 'use_precomputed_cond', False)
+        self.cond_dir = getattr(args, 'cond_dir', '/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/conditions')
+        if self.use_precomputed_cond and self.cond_dir is None:
+            raise ValueError("cond_dir must be provided when use_precomputed_cond is True")
         return
     
     def __getitem__(self, index):
@@ -682,50 +687,83 @@ class CondSurfPosData(SurfPosData):
             data = pickle.load(tf)
         _, _, _, _, _, _, _, _, surf_pos, _, _, _ = data.values()
 
-        # Load point cloud embedding
+        # Load point cloud embedding or pre-calculated condition
         filename_pkl = os.path.basename(data_path)
         filename_pkl_no_ext = os.path.splitext(filename_pkl)[0]
-        # Extract subdir and filename_base from the pickle filename
         parts = filename_pkl_no_ext.split('_')
         if len(parts) >= 2:
             subdir = parts[0]
             filename_base = '_'.join(parts[1:])
         else:
-            # Fallback if naming convention is different
             subdir = os.path.basename(os.path.dirname(data_path))
             filename_base = filename_pkl_no_ext
-        
-        # Try to load precomputed embedding if enabled
-        pc_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(data_path))), 'pc_cad', subdir, filename_base + '.ply')
-        mesh = trimesh.load(pc_path)
-        point_cloud = mesh.vertices
-        
-        # Normalize the point cloud using the specified method
-        point_cloud = normalize_point_cloud(point_cloud)
-        
-        # Resample to the required size
-        point_cloud = resample_point_cloud(point_cloud, 8192)
-            
-        # Use point cloud directly (will be processed by VAE encoder in the model)
-        point_cloud = torch.FloatTensor(point_cloud)
 
         # Data augmentation
         random_num = np.random.rand()
+        
+        # --- Rotation Augmentation ---
+        # We decide the rotation first, then load either the rotated PC or the rotated pre-computed condition
+        rotation = None
+        if random_num > 0.5 and self.aug:
+            axis = random.choice(['x', 'y', 'z'])
+            angle = random.choice([90, 180, 270])
+            rotation = (axis, angle)
 
-        if random_num>0.5 and self.aug:
-            # Get all eight corners
+            # Apply rotation to surf_pos
             surfpos_corners = bbox_corners(surf_pos)
-
-            # Random rotation
-            for axis in ['x', 'y', 'z']:
-                angle = random.choice([90, 180, 270])
-                surfpos_corners = rotate_axis(surfpos_corners, angle, axis, normalized=True)
-                point_cloud = rotate_point_cloud(point_cloud.numpy(), angle, axis)
-                point_cloud = torch.FloatTensor(point_cloud)
-            
-            # Re-compute the bottom left and top right corners
+            surfpos_corners = rotate_axis(surfpos_corners, angle, axis, normalized=True)
             surf_pos = get_bbox(surfpos_corners)
-            surf_pos = surf_pos.reshape(len(surf_pos),6)
+            surf_pos = surf_pos.reshape(len(surf_pos), 6)
+
+        if self.use_precomputed_cond:
+            cond_item_dir = os.path.join(self.cond_dir, subdir, filename_base)
+            if rotation:
+                axis, angle = rotation
+                cond_filename = f"rot_{axis}_{angle}.pkl"
+            else:
+                cond_filename = "no_rot.pkl"
+            
+            cond_path = os.path.join(cond_item_dir, cond_filename)
+            with open(cond_path, 'rb') as f:
+                condition = pickle.load(f)
+            condition = torch.FloatTensor(condition).squeeze(0) # Remove batch dim from saved data
+            point_cloud_or_cond = condition
+        else:
+            # --- Load Point Cloud (original logic) ---
+            if self.vae_encoder_type == 'hy3dshape':
+                pc_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(data_path))), 'pc_normal', subdir, filename_base + '.ply')
+                plydata = PlyData.read(pc_path)
+                vertex_data = plydata['vertex']
+                points = np.vstack([vertex_data['x'], vertex_data['y'], vertex_data['z']]).T
+                normals = np.vstack([vertex_data['nx'], vertex_data['ny'], vertex_data['nz']]).T
+                points = normalize_point_cloud(points)
+                if len(points) != 81920:
+                    indices = np.random.choice(len(points), 81920, replace=len(points) < 81920)
+                    points = points[indices]
+                    normals = normals[indices]
+                sharp_edge_labels = np.zeros((points.shape[0], 1), dtype=np.float32)
+                point_cloud = np.concatenate([points, normals, sharp_edge_labels], axis=1)
+            else: # 'vecset' or default
+                pc_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(data_path))), 'pc_cad', subdir, filename_base + '.ply')
+                mesh = trimesh.load(pc_path)
+                point_cloud = mesh.vertices
+                point_cloud = normalize_point_cloud(point_cloud)
+                point_cloud = resample_point_cloud(point_cloud, 8192)
+            
+            # --- Apply rotation to point cloud if augmented ---
+            if rotation:
+                axis, angle = rotation
+                if self.vae_encoder_type == 'hy3dshape':
+                    points = point_cloud[:, :3]
+                    normals = point_cloud[:, 3:6]
+                    rotated_points = rotate_point_cloud(points, angle, axis)
+                    rotated_normals = rotate_point_cloud(normals, angle, axis)
+                    sharp_edges = point_cloud[:, 6:]
+                    point_cloud = np.concatenate([rotated_points, rotated_normals, sharp_edges], axis=1)
+                else:
+                    point_cloud = rotate_point_cloud(point_cloud, angle, axis)
+
+            point_cloud_or_cond = torch.FloatTensor(point_cloud)
 
         # Make bbox range larger
         surf_pos = surf_pos * self.bbox_scaled
@@ -745,14 +783,18 @@ class CondSurfPosData(SurfPosData):
             return (
                 torch.FloatTensor(surf_pos),
                 torch.LongTensor([data_class+1]), # add 1, class 0 = uncond (furniture)
-                point_cloud
+                point_cloud_or_cond
             )
         else:
-            return torch.FloatTensor(surf_pos), point_cloud # abc or deepcad
+            return torch.FloatTensor(surf_pos), point_cloud_or_cond # abc or deepcad
 
 
 class CondSurfZData(SurfZData):
     """ Surface latent geometry Dataloader with point cloud condition """
+    def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
+        super().__init__(input_data, input_list, validate, aug, args)
+        return
+
     def __getitem__(self, index):
         # Load data
         data_class = None
@@ -767,15 +809,21 @@ class CondSurfZData(SurfZData):
 
         # Load point cloud
         filename_pkl = os.path.basename(data_path)
-        filename_ply = filename_pkl.replace('.pkl', '.ply')
-        subdir, filename_base = filename_ply.split('_')
-        pc_path = os.path.join(os.path.dirname(os.path.dirname(data_path)), 'pc_cad', subdir, filename_base + '.ply')
-        point_cloud = trimesh.load(pc_path).vertices
-
-        # Randomly sample 2048 points
-        if point_cloud.shape[0] > 2048:
-            indices = np.random.choice(point_cloud.shape[0], 2048, replace=False)
-            point_cloud = point_cloud[indices]
+        filename_pkl_no_ext = os.path.splitext(filename_pkl)[0]
+        parts = filename_pkl_no_ext.split('_')
+        if len(parts) >= 2:
+            subdir = parts[0]
+            filename_base = '_'.join(parts[1:])
+        else:
+            subdir = os.path.basename(os.path.dirname(data_path))
+            filename_base = filename_pkl_no_ext
+        
+        pc_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(data_path))), 'pc_cad', subdir, filename_base + '.ply')
+        mesh = trimesh.load(pc_path)
+        point_cloud = mesh.vertices
+        point_cloud = normalize_point_cloud(point_cloud)
+        point_cloud = resample_point_cloud(point_cloud, 8192)
+        point_cloud = torch.FloatTensor(point_cloud)
 
         # Data augmentation
         random_num = np.random.rand()
@@ -789,7 +837,8 @@ class CondSurfZData(SurfZData):
                 angle = random.choice([90, 180, 270]) 
                 surfpos_corners = rotate_axis(surfpos_corners, angle, axis, normalized=True)
                 surf_ncs = rotate_axis(surf_ncs, angle, axis, normalized=False)
-                point_cloud = rotate_point_cloud(point_cloud, angle, axis)
+                point_cloud = rotate_point_cloud(point_cloud.numpy(), angle, axis)
+                point_cloud = torch.FloatTensor(point_cloud)
             
             # Re-compute the bottom left and top right corners 
             surf_pos = get_bbox(surfpos_corners)
@@ -813,247 +862,12 @@ class CondSurfZData(SurfZData):
                 torch.FloatTensor(surf_ncs),
                 torch.BoolTensor(surf_mask),
                 torch.LongTensor([data_class+1]), # add 1, class 0 = uncond (furniture)
-                torch.FloatTensor(point_cloud)
+                point_cloud
             )  
         else:
             return (
                 torch.FloatTensor(surf_pos),
                 torch.FloatTensor(surf_ncs),
                 torch.BoolTensor(surf_mask),
-                torch.FloatTensor(point_cloud)
+                point_cloud
             ) # abc or deepcad
-
-      
-
-class CondEdgePosData(EdgePosData):
-    """ Edge Position (3D bbox) Dataloader with point cloud condition """
-    def __getitem__(self, index):
-        # Load data
-        data_class = None
-        if isinstance(self.data[index], tuple):
-            data_path, data_class = self.data[index]
-        else:
-            data_path = self.data[index]
-
-        with open(data_path, "rb") as tf:
-            data = pickle.load(tf)
-        
-        _, _, surf_ncs, _, _, _, _, faceEdge_adj, surf_pos, edge_pos, _, _ = data.values()
-
-        # Load point cloud
-        filename_pkl = os.path.basename(data_path)
-        filename_ply = filename_pkl.replace('.pkl', '.ply')
-        subdir, filename_base = filename_ply.split('_')
-        pc_path = os.path.join(os.path.dirname(os.path.dirname(data_path)), 'pc_cad/cad_step', subdir, filename_base + '.ply')
-        point_cloud = trimesh.load(pc_path).vertices
-        
-        # Randomly sample 2048 points
-        if point_cloud.shape[0] > 2048:
-            indices = np.random.choice(point_cloud.shape[0], 2048, replace=False)
-            point_cloud = point_cloud[indices]
-
-        # Data augmentation
-        random_num = np.random.rand()
-        if random_num > 0.5 and self.aug:
-            # Get all eight corners
-            surfpos_corners = bbox_corners(surf_pos)
-            edgepos_corners = bbox_corners(edge_pos)
-
-            # Random rotation
-            for axis in ['x', 'y', 'z']:
-                angle = random.choice([90, 180, 270]) 
-                surfpos_corners = rotate_axis(surfpos_corners, angle, axis, normalized=True)
-                edgepos_corners = rotate_axis(edgepos_corners, angle, axis, normalized=True)
-                surf_ncs = rotate_axis(surf_ncs, angle, axis, normalized=False)
-                point_cloud = rotate_point_cloud(point_cloud, angle, axis)
-            
-            # Re-compute the bottom left and top right corners 
-            surf_pos = get_bbox(surfpos_corners)
-            surf_pos = surf_pos.reshape(len(surf_pos),6)
-            edge_pos = get_bbox(edgepos_corners)
-            edge_pos = edge_pos.reshape(len(edge_pos),6)
-
-        # Increase bbox value range
-        surf_pos = surf_pos * self.bbox_scaled 
-        edge_pos = edge_pos * self.bbox_scaled 
-
-        # Mating duplication
-        edge_pos_duplicated = []
-        for adj in faceEdge_adj:
-            edge_pos_duplicated.append(edge_pos[adj])
-
-        # Randomly shuffle the edges per face
-        edge_pos_new = []
-        for pos in edge_pos_duplicated:
-            random_indices = np.random.permutation(pos.shape[0])
-            pos = pos[random_indices]
-            pos = pad_repeat(pos, self.max_edge) #make sure some values are always repeated
-            random_indices = np.random.permutation(pos.shape[0])
-            pos = pos[random_indices]
-            edge_pos_new.append(pos)
-        edge_pos = np.stack(edge_pos_new)
-
-        # Randomly shuffle the face sequence
-        random_indices = np.random.permutation(surf_pos.shape[0])
-        surf_pos = surf_pos[random_indices]
-        edge_pos = edge_pos[random_indices]
-        surf_ncs = surf_ncs[random_indices]
-    
-        # Padding
-        surf_pos, surf_mask = pad_zero(surf_pos, self.max_face, return_mask=True)
-        surf_ncs = pad_zero(surf_ncs, self.max_face)
-        edge_pos = pad_zero(edge_pos, self.max_face)
-    
-        if data_class is not None:
-            return (
-                torch.FloatTensor(edge_pos), 
-                torch.FloatTensor(surf_ncs), 
-                torch.FloatTensor(surf_pos), 
-                torch.BoolTensor(surf_mask), 
-                torch.LongTensor([data_class+1]), # add 1, class 0 = uncond (furniture)
-                torch.FloatTensor(point_cloud)
-            )  
-        else:
-            return (
-                torch.FloatTensor(edge_pos), 
-                torch.FloatTensor(surf_ncs), 
-                torch.FloatTensor(surf_pos), 
-                torch.BoolTensor(surf_mask),
-                torch.FloatTensor(point_cloud)
-            )# abc or deepcad
-
-
-class CondEdgeZData(EdgeZData):
-    """ Edge Latent z Dataloader with point cloud condition """
-    def __getitem__(self, index):
-        # Load data
-        data_class = None
-        if isinstance(self.data[index], tuple):
-            data_path, data_class = self.data[index]
-        else:
-            data_path = self.data[index]
-
-        with open(data_path, "rb") as tf:
-            data = pickle.load(tf)
-
-        _, _, surf_ncs, edge_ncs, corner_wcs, _, _, faceEdge_adj, surf_pos, edge_pos, _, _ = data.values()
-
-        # Load point cloud
-        filename_pkl = os.path.basename(data_path)
-        filename_ply = filename_pkl.replace('.pkl', '.ply')
-        subdir, filename_base = filename_ply.split('_')
-        pc_path = os.path.join(os.path.dirname(os.path.dirname(data_path)), 'pc_cad', subdir, filename_base + '.ply')
-        point_cloud = trimesh.load(pc_path).vertices
-        
-        # Randomly sample 2048 points
-        if point_cloud.shape[0] > 2048:
-            indices = np.random.choice(point_cloud.shape[0], 2048, replace=False)
-            point_cloud = point_cloud[indices]
-
-        # Data augmentation
-        random_num = np.random.rand()
-        if random_num > 0.5 and self.aug:
-            # Get all eight corners
-            surfpos_corners = bbox_corners(surf_pos)
-            edgepos_corners = bbox_corners(edge_pos)
-
-            # Random rotation
-            for axis in ['x', 'y', 'z']:
-                angle = random.choice([90, 180, 270]) 
-                surfpos_corners = rotate_axis(surfpos_corners, angle, axis, normalized=True)
-                edgepos_corners = rotate_axis(edgepos_corners, angle, axis, normalized=True)
-                corner_wcs = rotate_axis(corner_wcs, angle, axis, normalized=True)
-                surf_ncs = rotate_axis(surf_ncs, angle, axis, normalized=False)
-                edge_ncs = rotate_axis(edge_ncs, angle, axis, normalized=False)
-                point_cloud = rotate_point_cloud(point_cloud, angle, axis)
-            
-            # Re-compute the bottom left and top right corners 
-            surf_pos = get_bbox(surfpos_corners)
-            surf_pos = surf_pos.reshape(len(surf_pos),6)
-            edge_pos = get_bbox(edgepos_corners)
-            edge_pos = edge_pos.reshape(len(edge_pos),6)
-
-        # Increase value range
-        surf_pos = surf_pos * self.bbox_scaled 
-        edge_pos = edge_pos * self.bbox_scaled 
-        corner_wcs = corner_wcs * self.bbox_scaled 
-
-        # Mating duplication
-        edge_pos_duplicated = []
-        vertex_pos_duplicated = []
-        edge_ncs_duplicated = []
-        for adj in faceEdge_adj:
-            edge_ncs_duplicated.append(edge_ncs[adj])
-            edge_pos_duplicated.append(edge_pos[adj])
-            corners = corner_wcs[adj]
-            corners_sorted = []
-            for corner in corners:
-                sorted_indices = np.lexsort((corner[:, 2], corner[:, 1], corner[:, 0])) 
-                corners_sorted.append(corner[sorted_indices].flatten()) # 1 x 6 corner pos
-            corners = np.stack(corners_sorted)
-            vertex_pos_duplicated.append(corners)
-
-        # Edge Shuffle and Padding
-        edge_pos_new = []
-        edge_ncs_new = []
-        vert_pos_new = []
-        edge_mask = []
-        for pos, ncs, vert in zip(edge_pos_duplicated, edge_ncs_duplicated, vertex_pos_duplicated):
-            random_indices = np.random.permutation(pos.shape[0])
-            pos = pos[random_indices]
-            ncs = ncs[random_indices]
-            vert = vert[random_indices]
-
-            pos, mask = pad_zero(pos, self.max_edge, return_mask=True)
-            ncs = pad_zero(ncs, self.max_edge)
-            vert = pad_zero(vert, self.max_edge)
-            
-            edge_pos_new.append(pos)
-            edge_ncs_new.append(ncs)
-            edge_mask.append(mask)
-            vert_pos_new.append(vert)
-
-        edge_pos = np.stack(edge_pos_new)
-        edge_ncs = np.stack(edge_ncs_new)
-        edge_mask = np.stack(edge_mask)
-        vertex_pos = np.stack(vert_pos_new)
-
-        # Face Shuffle and Padding
-        random_indices = np.random.permutation(surf_pos.shape[0])
-        surf_pos = surf_pos[random_indices]
-        edge_pos = edge_pos[random_indices]
-        surf_ncs = surf_ncs[random_indices]
-        edge_ncs = edge_ncs[random_indices]
-        edge_mask = edge_mask[random_indices]
-        vertex_pos = vertex_pos[random_indices]
-    
-        # Padding
-        surf_pos = pad_zero(surf_pos, self.max_face)
-        surf_ncs = pad_zero(surf_ncs, self.max_face)
-        edge_pos = pad_zero(edge_pos, self.max_face)
-        edge_ncs = pad_zero(edge_ncs, self.max_face)
-        vertex_pos = pad_zero(vertex_pos, self.max_face)
-        padding = np.zeros((self.max_face-len(edge_mask), *edge_mask.shape[1:]))==0
-        edge_mask = np.concatenate([edge_mask, padding], 0)
-
-        if data_class is not None:
-            return (
-                torch.FloatTensor(edge_ncs), 
-                torch.FloatTensor(edge_pos), 
-                torch.BoolTensor(edge_mask),
-                torch.FloatTensor(surf_ncs), 
-                torch.FloatTensor(surf_pos), 
-                torch.FloatTensor(vertex_pos), 
-                torch.LongTensor([data_class+1]), # add 1, class 0 = uncond (furniture)
-                torch.FloatTensor(point_cloud)
-            )
-        else:
-            return (
-                torch.FloatTensor(edge_ncs), 
-                torch.FloatTensor(edge_pos), 
-                torch.BoolTensor(edge_mask),
-                torch.FloatTensor(surf_ncs), 
-                torch.FloatTensor(surf_pos), 
-                torch.FloatTensor(vertex_pos),
-                torch.FloatTensor(point_cloud)
-            )

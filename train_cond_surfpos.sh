@@ -15,9 +15,15 @@
 #     --env deepcad_ldm_surfpos --train_nepoch 3000 --test_nepoch 200 --save_nepoch 1 \
 #     --max_face 30 --max_edge 20
 
-CUDA_VISIBLE_DEVICES=4,5,6,7 OMP_NUM_THREADS=2 torchrun --nproc_per_node=4 ldm.py --data data \
+    # --weight /home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/proj_log/deepcad_ldm_surfpos/surfpos_epoch_199.pt \
+
+    # --weight /home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/proj_log/deepcad_ldm_surfpos_hy/surfpos_epoch_4.pt \
+CUDA_VISIBLE_DEVICES=1,2,3 OMP_NUM_THREADS=2 torchrun --nproc_per_node=1 ldm.py --data data \
     --option cond_surfpos \
-    --gpu 4 5 6 7 \
-    --batch_size 256 \
-    --env deepcad_ldm_surfpos --train_nepoch 3000 --test_nepoch 200 --save_nepoch 1 \
+    --gpu 1 2 3 \
+    --batch_size 32 \
+	--vae_encoder_type hy3dshape \
+	--use_precomputed_cond \
+    --data_aug \
+    --env deepcad_ldm_surfpos_hy_3 --train_nepoch 3000 --test_nepoch 2000 --save_nepoch 1 \
     --max_face 30 --max_edge 20

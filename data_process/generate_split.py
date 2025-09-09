@@ -35,8 +35,12 @@ def generate_split(processed_dir, pc_dir, output_path):
         
         pkl_filepath = os.path.join(processed_dir, filename)
 
-        if os.path.exists(pc_filepath) and os.path.exists(pkl_filepath):
+        condition_path = os.path.join('/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/conditions', sub_folder, file_no)
+
+        if os.path.exists(pc_filepath) and os.path.exists(pkl_filepath) and os.path.exists(condition_path):
             valid_items.append(f"{sub_folder}/{file_no}")
+
+        
 
     print(f"Found {len(valid_items)} valid items with both .pkl and .ply files.")
 
@@ -45,8 +49,8 @@ def generate_split(processed_dir, pc_dir, output_path):
 
     # Split the data (80% train, 10% validation, 10% test)
     total_count = len(valid_items)
-    train_split = int(total_count * 0.9)
-    val_split = int(total_count * 0.95)
+    train_split = int(total_count * 0.99)
+    val_split = int(total_count * 0.995)
 
     train_data = valid_items[:train_split]
     val_data = valid_items[train_split:val_split]
@@ -75,6 +79,8 @@ if __name__ == '__main__':
     parser.add_argument('--processed_dir', type=str, default='/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/processed/cad_step',
                         help='Directory containing the .pkl files.')
     parser.add_argument('--pc_dir', type=str, default='/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/pc_cad',
+                        help='Directory containing the point cloud .ply files.')
+    parser.add_argument('--cond_dir', type=str, default='/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/conditions',
                         help='Directory containing the point cloud .ply files.')
     parser.add_argument('--output_path', type=str, default='/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/filtered.json',
                         help='Path to save the output JSON split file.')
