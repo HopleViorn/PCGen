@@ -719,9 +719,9 @@ class CondSurfPosData(SurfPosData):
             cond_item_dir = os.path.join(self.cond_dir, subdir, filename_base)
             if rotation:
                 axis, angle = rotation
-                cond_filename = f"rot_{axis}_{angle}.pkl"
+                cond_filename = f"rot_{axis}_{angle}_latent.pkl"
             else:
-                cond_filename = "no_rot.pkl"
+                cond_filename = "no_rot_latent.pkl"
             
             cond_path = os.path.join(cond_item_dir, cond_filename)
             with open(cond_path, 'rb') as f:

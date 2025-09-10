@@ -62,7 +62,8 @@ def sample_from_image(eval_args, image_path):
         # Since we have one image, we take the first element.
         latents = pipeline_shapegen(image=image)
         vae = ShapeVAE(argparse.Namespace(**{'vae_encoder_type':'hy3dshape'}), device = device)
-        condition = vae.decode(latents)
+        # condition = vae.decode(latents)
+        condition = latents
 
     print("Latent code generated successfully.")
 
@@ -80,7 +81,7 @@ def sample_from_image(eval_args, image_path):
     # Load models
     surfPos_model = CondSurfPosNet(use_cf=False)
     # surfPos_model.load_state_dict(torch.load(eval_args['surfpos_weight']))
-    surfPos_model.load_state_dict(torch.load('/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/proj_log/deepcad_ldm_surfpos_hy_2/surfpos_epoch_2.pt'))
+    surfPos_model.load_state_dict(torch.load('/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/proj_log/deepcad_ldm_surfpos_hy_latent/surfpos_epoch_15.pt'))
     surfPos_model = surfPos_model.to(device).eval()
 
     surfZ_model = SurfZNet(use_cf=False)

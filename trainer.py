@@ -1091,7 +1091,7 @@ class CondSurfPosTrainer(SurfPosTrainer):
         
         self.optimizer = torch.optim.AdamW(
             self.network_params,
-            lr=5e-5,
+            lr=1e-4,
             betas=(0.95, 0.999),
             weight_decay=1e-6,
             eps=1e-08,

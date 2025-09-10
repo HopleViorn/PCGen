@@ -26,7 +26,6 @@ class ShapeVAE(nn.Module):
             encoder = HYVAE.from_pretrained(
                 'tencent/Hunyuan3D-2.1',
                 subfolder='hunyuan3d-vae-v2-1',
-                # device=self.device, # DataParallel will handle device placement
                 dtype=torch.float16
             )
             encoder.eval()

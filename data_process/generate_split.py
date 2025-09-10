@@ -38,7 +38,16 @@ def generate_split(processed_dir, pc_dir, output_path):
         condition_path = os.path.join('/home/ljr/Hunyuan3D-2.1/RelatedWork/BrepGen/data/conditions', sub_folder, file_no)
 
         if os.path.exists(pc_filepath) and os.path.exists(pkl_filepath) and os.path.exists(condition_path):
-            valid_items.append(f"{sub_folder}/{file_no}")
+            checked = True
+            for axis in ['x','y','z']:
+                for rot in ['90','180','270']:
+                    if not os.path.exists(os.path.join(condition_path,f'rot_{axis}_{rot}_latent.pkl')):
+                        checked=False
+                        break
+                if checked is False:
+                    break
+            if checked is True:
+                valid_items.append(f"{sub_folder}/{file_no}")
 
         
 
